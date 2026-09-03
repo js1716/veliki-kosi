@@ -9,6 +9,9 @@
 
   <script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
 
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
   <style>
 
     /* =========================================================
@@ -90,6 +93,32 @@
 
     .button-print:hover {
       background: #374151;
+    }
+
+    .button-save {
+      margin-left: 8px;
+
+      background: #0f766e;
+
+      color: #ffffff;
+    }
+
+    .button-save:hover {
+      background: #0d9488;
+    }
+
+    .button-save:disabled {
+      opacity: 0.6;
+
+      cursor: not-allowed;
+    }
+
+    .save-status {
+      margin-left: 10px;
+
+      font-size: 11px;
+
+      color: #6b7280;
     }
 
 
@@ -477,6 +506,19 @@
     >
       🖨 Tiskaj / PDF
     </button>
+
+    <button
+      id="saveButton"
+      class="button button-save"
+      type="button"
+    >
+      💾 Shrani
+    </button>
+
+    <span
+      id="saveStatus"
+      class="save-status"
+    ></span>
 
   </div>
 
@@ -1206,6 +1248,174 @@ function openWidthConfiguration() {
 
     }
   );
+
+
+  const folderSection =
+    document.createElement('div');
+
+
+  Object.assign(
+    folderSection.style,
+    {
+
+      marginTop: '6px',
+
+      marginBottom: '4px',
+
+      paddingTop: '14px',
+
+      borderTop: '1px solid #e5e7eb'
+
+    }
+  );
+
+
+  const folderTitle =
+    document.createElement('div');
+
+
+  folderTitle.textContent =
+    'Mapa za shranjevanje PDF';
+
+
+  Object.assign(
+    folderTitle.style,
+    {
+
+      fontSize: '13px',
+
+      fontWeight: '700',
+
+      marginBottom: '4px'
+
+    }
+  );
+
+
+  folderSection.appendChild(
+    folderTitle
+  );
+
+
+  const folderStatus =
+    document.createElement('div');
+
+
+  folderStatus.id =
+    'folderStatus';
+
+
+  Object.assign(
+    folderStatus.style,
+    {
+
+      fontSize: '11px',
+
+      color: '#6b7280',
+
+      lineHeight: '1.4',
+
+      marginBottom: '8px'
+
+    }
+  );
+
+
+  folderStatus.textContent =
+    'Nalaganje …';
+
+
+  folderSection.appendChild(
+    folderStatus
+  );
+
+
+  const folderButton =
+    document.createElement('button');
+
+
+  folderButton.type =
+    'button';
+
+
+  folderButton.textContent =
+    'Izberi mapo …';
+
+
+  Object.assign(
+    folderButton.style,
+    {
+
+      height: '32px',
+
+      padding: '0 12px',
+
+      border: '1px solid #d1d5db',
+
+      background: '#ffffff',
+
+      borderRadius: '5px',
+
+      cursor: 'pointer',
+
+      fontSize: '12px',
+
+      fontWeight: '600'
+
+    }
+  );
+
+
+  folderButton.onclick =
+    () => chooseSaveFolder(folderStatus);
+
+
+  folderSection.appendChild(
+    folderButton
+  );
+
+
+  panel.appendChild(
+    folderSection
+  );
+
+
+  if (window.showDirectoryPicker) {
+
+    getSavedDirHandle().then(
+      handle => {
+
+        folderStatus.textContent =
+          handle
+            ? `Izbrana mapa: ${handle.name}`
+            : 'Mapa še ni izbrana – uporabljena bo privzeta mapa za prenose.';
+
+      }
+    );
+
+  } else {
+
+    folderStatus.textContent =
+      'Izbira mape ni podprta v tem brskalniku/oknu (potreben je Chrome ali Edge). ' +
+      'PDF bo namesto tega prenesen v privzeto mapo za prenose.';
+
+
+    folderButton.disabled =
+      true;
+
+
+    Object.assign(
+      folderButton.style,
+      {
+
+        opacity: '0.5',
+
+        cursor: 'not-allowed'
+
+      }
+    );
+
+  }
 
 
   const buttons =
@@ -2155,6 +2365,517 @@ if (printButton) {
   printButton.addEventListener(
     'click',
     printReport
+  );
+
+}
+
+
+/* =========================================================
+   SAVE FOLDER (File System Access API + IndexedDB)
+   =========================================================
+
+   The folder is chosen once, from the Creator Panel ("Izberi
+   mapo …" inside the column-width settings dialog), using
+   window.showDirectoryPicker(). The returned handle is stored
+   in this widget's own IndexedDB (handles are not JSON, so they
+   can't go through grist.setOptions) and reused on later saves.
+
+   This API is Chromium-only (Chrome/Edge) and may be blocked
+   entirely inside Grist's widget iframe depending on the
+   browser's permissions policy. When unavailable, or when the
+   stored folder can't be written to anymore, saving falls back
+   to the browser's native "Save As" dialog, and finally to a
+   plain download.
+*/
+
+const SAVE_DB_NAME = 'predaja-widget-db';
+const SAVE_DB_STORE = 'handles';
+const SAVE_DB_KEY = 'saveFolder';
+
+function openHandleDB() {
+
+  return new Promise(
+    (resolve, reject) => {
+
+      const req =
+        indexedDB.open(SAVE_DB_NAME, 1);
+
+
+      req.onupgradeneeded =
+        () => {
+
+          req.result.createObjectStore(
+            SAVE_DB_STORE
+          );
+
+        };
+
+
+      req.onsuccess =
+        () => resolve(req.result);
+
+
+      req.onerror =
+        () => reject(req.error);
+
+    }
+  );
+
+}
+
+async function getSavedDirHandle() {
+
+  if (!window.showDirectoryPicker) {
+
+    return null;
+
+  }
+
+
+  try {
+
+    const db =
+      await openHandleDB();
+
+
+    return await new Promise(
+      (resolve, reject) => {
+
+        const tx =
+          db.transaction(SAVE_DB_STORE, 'readonly');
+
+        const req =
+          tx.objectStore(SAVE_DB_STORE).get(SAVE_DB_KEY);
+
+
+        req.onsuccess =
+          () => resolve(req.result || null);
+
+
+        req.onerror =
+          () => reject(req.error);
+
+      }
+    );
+
+  } catch (e) {
+
+    return null;
+
+  }
+
+}
+
+async function setSavedDirHandle(handle) {
+
+  const db =
+    await openHandleDB();
+
+
+  return new Promise(
+    (resolve, reject) => {
+
+      const tx =
+        db.transaction(SAVE_DB_STORE, 'readwrite');
+
+
+      tx.objectStore(SAVE_DB_STORE).put(
+        handle,
+        SAVE_DB_KEY
+      );
+
+
+      tx.oncomplete =
+        () => resolve();
+
+
+      tx.onerror =
+        () => reject(tx.error);
+
+    }
+  );
+
+}
+
+async function chooseSaveFolder(statusEl) {
+
+  if (!window.showDirectoryPicker) {
+
+    if (statusEl) {
+
+      statusEl.textContent =
+        'Izbira mape ni podprta v tem brskalniku/oknu.';
+
+    }
+
+
+    return null;
+
+  }
+
+
+  try {
+
+    const handle =
+      await window.showDirectoryPicker(
+        { mode: 'readwrite' }
+      );
+
+
+    await setSavedDirHandle(handle);
+
+
+    if (statusEl) {
+
+      statusEl.textContent =
+        `Izbrana mapa: ${handle.name}`;
+
+    }
+
+
+    return handle;
+
+  } catch (e) {
+
+    if (statusEl) {
+
+      statusEl.textContent =
+        'Izbira mape ni uspela ali je bila preklicana.';
+
+    }
+
+
+    return null;
+
+  }
+
+}
+
+
+/* =========================================================
+   SAVE AS PDF
+   ========================================================= */
+
+function getPoletazaLabel() {
+
+  const firstRecord =
+    allRecords[0];
+
+
+  return firstRecord
+    ? valueToText(firstRecord.Poletaza).trim()
+    : '';
+
+}
+
+function sanitizeFilename(text) {
+
+  const cleaned =
+    String(text || '')
+      .replace(/[\\/:*?"<>|]+/g, '-')
+      .trim();
+
+
+  return cleaned || 'Predaja';
+
+}
+
+function buildPdfFilename() {
+
+  const today =
+    new Date();
+
+
+  const dd =
+    String(today.getDate()).padStart(2, '0');
+
+
+  const mm =
+    String(today.getMonth() + 1).padStart(2, '0');
+
+
+  const yy =
+    String(today.getFullYear()).slice(-2);
+
+
+  const label =
+    sanitizeFilename(
+      getPoletazaLabel() || 'Predaja'
+    );
+
+
+  return `${label}-${dd}${mm}${yy}.pdf`;
+
+}
+
+async function generatePdfBlob() {
+
+  const { jsPDF } =
+    window.jspdf;
+
+
+  const paper =
+    document.querySelector('.paper');
+
+  const toolbar =
+    document.querySelector('.toolbar');
+
+
+  // Temporarily strip the on-screen chrome (toolbar, card shadow,
+  // centered max-width) so the capture matches the printed page.
+  const prevToolbarDisplay =
+    toolbar.style.display;
+
+  const prevBoxShadow =
+    paper.style.boxShadow;
+
+  const prevMargin =
+    paper.style.margin;
+
+  const prevMaxWidth =
+    paper.style.maxWidth;
+
+
+  toolbar.style.display = 'none';
+  paper.style.boxShadow = 'none';
+  paper.style.margin = '0';
+  paper.style.maxWidth = 'none';
+
+
+  const doc =
+    new jsPDF(
+      { orientation: 'landscape', unit: 'mm', format: 'a4' }
+    );
+
+
+  try {
+
+    await new Promise(
+      (resolve) => {
+
+        doc.html(
+          paper,
+          {
+            x: 10,
+            y: 10,
+            width: 277,
+            windowWidth: paper.scrollWidth,
+            autoPaging: 'text',
+            html2canvas: { scale: 2, useCORS: true },
+            callback: () => resolve(),
+          }
+        );
+
+      }
+    );
+
+  } finally {
+
+    toolbar.style.display = prevToolbarDisplay;
+    paper.style.boxShadow = prevBoxShadow;
+    paper.style.margin = prevMargin;
+    paper.style.maxWidth = prevMaxWidth;
+
+  }
+
+
+  return doc.output('blob');
+
+}
+
+async function saveReport() {
+
+  const statusEl =
+    document.getElementById('saveStatus');
+
+  const saveBtn =
+    document.getElementById('saveButton');
+
+
+  renderTable();
+  applyColumnWidths();
+  updateTitle();
+
+
+  if (statusEl) statusEl.textContent = 'Ustvarjanje PDF …';
+  if (saveBtn) saveBtn.disabled = true;
+
+
+  try {
+
+    const blob =
+      await generatePdfBlob();
+
+    const filename =
+      buildPdfFilename();
+
+
+    // 1) The folder configured in the Creator Panel.
+    const dirHandle =
+      await getSavedDirHandle();
+
+
+    if (dirHandle) {
+
+      try {
+
+        const current =
+          await dirHandle.queryPermission(
+            { mode: 'readwrite' }
+          );
+
+
+        const granted =
+          current === 'granted'
+            ? true
+            : (await dirHandle.requestPermission(
+                { mode: 'readwrite' }
+              )) === 'granted';
+
+
+        if (granted) {
+
+          const fileHandle =
+            await dirHandle.getFileHandle(
+              filename,
+              { create: true }
+            );
+
+
+          const writable =
+            await fileHandle.createWritable();
+
+
+          await writable.write(blob);
+          await writable.close();
+
+
+          if (statusEl) {
+
+            statusEl.textContent =
+              `Shranjeno v "${dirHandle.name}" kot ${filename}`;
+
+          }
+
+
+          return;
+
+        }
+
+      } catch (e) {
+
+        // Folder no longer accessible - fall through to the
+        // next strategy below.
+
+      }
+
+    }
+
+
+    // 2) The browser's native "Save As" dialog, if supported.
+    if (window.showSaveFilePicker) {
+
+      try {
+
+        const handle =
+          await window.showSaveFilePicker(
+            {
+              suggestedName: filename,
+              types: [
+                {
+                  description: 'PDF',
+                  accept: { 'application/pdf': ['.pdf'] }
+                }
+              ]
+            }
+          );
+
+
+        const writable =
+          await handle.createWritable();
+
+
+        await writable.write(blob);
+        await writable.close();
+
+
+        if (statusEl) {
+
+          statusEl.textContent =
+            `Shranjeno kot ${filename}`;
+
+        }
+
+
+        return;
+
+      } catch (e) {
+
+        // User cancelled, or unsupported here - fall through.
+
+      }
+
+    }
+
+
+    // 3) Last resort: a normal browser download.
+    const url =
+      URL.createObjectURL(blob);
+
+    const a =
+      document.createElement('a');
+
+
+    a.href = url;
+    a.download = filename;
+
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    URL.revokeObjectURL(url);
+
+
+    if (statusEl) {
+
+      statusEl.textContent =
+        dirHandle
+          ? `Izbrana mapa ni dosegljiva – ${filename} prenesen v privzeto mapo za prenose.`
+          : `${filename} prenesen v privzeto mapo za prenose.`;
+
+    }
+
+  } catch (e) {
+
+    if (statusEl) {
+
+      statusEl.textContent =
+        'Napaka pri ustvarjanju PDF.';
+
+    }
+
+
+    console.error(e);
+
+  } finally {
+
+    if (saveBtn) saveBtn.disabled = false;
+
+  }
+
+}
+
+const saveButton =
+  document.getElementById(
+    'saveButton'
+  );
+
+
+if (saveButton) {
+
+  saveButton.addEventListener(
+    'click',
+    saveReport
   );
 
 }
