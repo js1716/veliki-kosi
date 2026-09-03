@@ -2621,8 +2621,28 @@ async function generatePdfBlob() {
     document.querySelector('.toolbar');
 
 
+  /*
+    jsPDF's .html() scales the captured element to fit the given
+    "width" (in mm). If we capture .paper at whatever width the
+    Grist widget panel happens to be (often much narrower than a
+    real page), that narrow capture gets stretched to fill the
+    page - blowing up every pixel, including text, which is why
+    only a few huge characters fit per line.
+
+    Fix: force .paper to a fixed pixel width that corresponds
+    1:1 to the target content width in mm (at 96 DPI) before
+    capturing, so there's no mismatch to stretch away.
+  */
+
+  const MM_TO_PX = 96 / 25.4;
+  const PAGE_MARGIN_MM = 10;
+  const CONTENT_WIDTH_MM = 297 - (PAGE_MARGIN_MM * 2);
+  const CONTENT_WIDTH_PX = Math.round(CONTENT_WIDTH_MM * MM_TO_PX);
+
+
   // Temporarily strip the on-screen chrome (toolbar, card shadow,
-  // centered max-width) so the capture matches the printed page.
+  // centered max-width) and force the real print-content width so
+  // the capture matches the printed page 1:1.
   const prevToolbarDisplay =
     toolbar.style.display;
 
@@ -2635,11 +2655,15 @@ async function generatePdfBlob() {
   const prevMaxWidth =
     paper.style.maxWidth;
 
+  const prevWidth =
+    paper.style.width;
+
 
   toolbar.style.display = 'none';
   paper.style.boxShadow = 'none';
   paper.style.margin = '0';
   paper.style.maxWidth = 'none';
+  paper.style.width = `${CONTENT_WIDTH_PX}px`;
 
 
   const doc =
@@ -2656,10 +2680,10 @@ async function generatePdfBlob() {
         doc.html(
           paper,
           {
-            x: 10,
-            y: 10,
-            width: 277,
-            windowWidth: paper.scrollWidth,
+            x: PAGE_MARGIN_MM,
+            y: PAGE_MARGIN_MM,
+            width: CONTENT_WIDTH_MM,
+            windowWidth: CONTENT_WIDTH_PX,
             autoPaging: 'text',
             html2canvas: { scale: 2, useCORS: true },
             callback: () => resolve(),
@@ -2675,6 +2699,7 @@ async function generatePdfBlob() {
     paper.style.boxShadow = prevBoxShadow;
     paper.style.margin = prevMargin;
     paper.style.maxWidth = prevMaxWidth;
+    paper.style.width = prevWidth;
 
   }
 
