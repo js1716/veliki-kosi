@@ -391,31 +391,76 @@
       // Integers print without a decimal point; keep locale comma otherwise.
       return Number.isInteger(v) ? String(v) : String(v).replace('.', ',');
     }
-    if (typeof v === 'object') { return ''; }
+    if (typeof v === 'object') {
+      // Encoded values can turn up on any field if a column of an
+      // unexpected type gets mapped. Render the sensible ones rather
+      // than silently blanking the box.
+      if (Array.isArray(v)) {
+        var p = dateParts(v);
+        if (p) { return p.d + '. ' + p.m + '. ' + p.y; }
+        if (v[0] === 'L') {                       // Choice List / Reference List
+          return v.slice(1).filter(function (x) {
+            return typeof x === 'string' || typeof x === 'number';
+          }).join(', ');
+        }
+      }
+      return '';
+    }
     return String(v).trim();
   }
 
-  /* Grist Date/DateTime columns arrive as seconds since epoch.
-     Text columns are passed through untouched. */
+  /* Because we ask for encoded values, a Date column arrives as
+     ['d', seconds] and a DateTime as ['D', seconds, timezone]. Older
+     versions may hand over a bare number instead. Anything else (a Text
+     column) is passed through as typed. */
+  function dateParts(value) {
+    var secs = null, tz = 'UTC';
+    if (typeof value === 'number') {
+      secs = value;
+    } else if (Array.isArray(value)) {
+      if (value[0] === 'd' && typeof value[1] === 'number') {
+        secs = value[1];
+      } else if (value[0] === 'D' && typeof value[1] === 'number') {
+        secs = value[1];
+        tz = value[2] || 'UTC';
+      }
+    }
+    if (secs === null) { return null; }
+    var dt = new Date(secs * 1000);
+    if (isNaN(dt.getTime())) { return null; }
+
+    // A DateTime carries its own timezone; reading it in UTC would roll
+    // late-evening sessions over to the next day.
+    try {
+      var o = {};
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit'
+      }).formatToParts(dt).forEach(function (p) { o[p.type] = p.value; });
+      if (o.year && o.month && o.day) {
+        return { y: +o.year, m: +o.month, d: +o.day };
+      }
+    } catch (e) { /* unknown timezone — fall through to UTC */ }
+
+    return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
+  }
+
+  /* Slovenian long form: 25. 11. 2024 */
   function dateText(record, mappings, key) {
     var v = raw(record, mappings, key);
     if (v === null || v === undefined || v === '' || v === false) { return ''; }
-    if (typeof v === 'number') {
-      var d = new Date(v * 1000);
-      if (isNaN(d.getTime())) { return ''; }
-      return d.getUTCDate() + '. ' + (d.getUTCMonth() + 1) + '. ' + d.getUTCFullYear();
-    }
+    var p = dateParts(v);
+    if (p) { return p.d + '. ' + p.m + '. ' + p.y; }
+    if (typeof v === 'object') { return ''; }
     return String(v).trim();
   }
 
   /* Same value, but safe for use inside a file name. */
   function dateSlug(record, mappings, key) {
     var v = raw(record, mappings, key);
-    if (typeof v === 'number') {
-      var d = new Date(v * 1000);
-      if (isNaN(d.getTime())) { return ''; }
-      var p = function (n) { return (n < 10 ? '0' : '') + n; };
-      return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+    var p = dateParts(v);
+    if (p) {
+      var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+      return p.y + '-' + pad(p.m) + '-' + pad(p.d);
     }
     return dateText(record, mappings, key).replace(/[^\w-]+/g, '');
   }
@@ -704,7 +749,9 @@
      7. Wire up Grist
   ------------------------------------------------------------------ */
   grist.ready({
-    requiredAccess: 'read table',
+    // 'full' is required: attachments (the signature) live outside the
+    // mapped table, so a table-scoped access token cannot fetch them.
+    requiredAccess: 'full',
     columns: COLUMNS
   });
 
