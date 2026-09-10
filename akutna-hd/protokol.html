@@ -344,7 +344,7 @@
     { name: 'Druga_navodila', title: 'Navodila – Drugo',         type: 'Any', optional: true },
     { name: 'Terapija',       title: 'Dodatna terapija med in po HD', type: 'Any', optional: true },
     { name: 'Nefrolog',       title: 'Nefrolog (ime in priimek)', type: 'Any', optional: true },
-    { name: 'Podpis',         title: 'Podpis (slika)',           type: 'Attachments,Text', optional: true }
+    { name: 'Podpis',         title: 'Podpis (slika)',           type: 'Any', optional: true, description: 'Stolpec tipa Attachments, ali besedilo z URL / data: naslovom slike' }
   ];
 
   /* Prefixes for the six "KLINIČNI PREGLED IN NAVODILA" lines. */
@@ -437,22 +437,59 @@
     });
   }
 
+  /* An Attachments cell can reach us in several shapes depending on the
+     Grist version and whether values arrive encoded:
+       ['L', 3, 7]   encoded reference list
+       [3, 7]        decoded list
+       3             single id
+     Anything else (empty cell, null, '') yields no ids. */
+  function attachmentIds(value) {
+    if (value === null || value === undefined || value === '' || value === false) { return []; }
+    if (typeof value === 'number') { return [value]; }
+    if (Array.isArray(value)) {
+      var list = (value[0] === 'L') ? value.slice(1) : value;
+      return list.filter(function (x) { return typeof x === 'number' && x > 0; });
+    }
+    return [];
+  }
+
   async function resolveSignature(value) {
-    if (!value) { return null; }
     if (typeof value === 'string') {
       var s = value.trim();
-      return (s.indexOf('data:') === 0 || s.indexOf('http') === 0) ? s : null;
+      if (!s) { return null; }
+      if (s.indexOf('data:') === 0 || s.indexOf('http') === 0) { return s; }
+      throw new Error('Stolpec Podpis je besedilo, ki ni slika ali URL.');
     }
-    // Grist reference list: ['L', id, id, ...]
-    if (Array.isArray(value) && value[0] === 'L' && value.length > 1) {
-      var attId = value[1];
-      var tok = await grist.docApi.getAccessToken({ readOnly: true });
-      var url = tok.baseUrl + '/attachments/' + attId + '/download?auth=' + tok.token;
+
+    var ids = attachmentIds(value);
+    if (!ids.length) { return null; }
+
+    if (!grist.docApi || !grist.docApi.getAccessToken) {
+      throw new Error('Ta različica Grista ne podpira getAccessToken.');
+    }
+    var tok = await grist.docApi.getAccessToken({ readOnly: true });
+    var url = tok.baseUrl + '/attachments/' + ids[0] + '/download?auth=' + tok.token;
+
+    // Preferred: inline the bytes as a data URL, so the image survives
+    // printing and PDF export without a second network round trip.
+    try {
       var resp = await fetch(url);
-      if (!resp.ok) { throw new Error('attachment ' + resp.status); }
+      if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
       return await blobToDataUrl(await resp.blob());
+    } catch (e) {
+      console.warn('Inline branje podpisa ni uspelo, uporabljam neposredni URL:', e);
+      return url;   // let the <img> element load it itself
     }
-    return null;
+  }
+
+  /* Resolves once the image has actually painted (or failed), so a click
+     on Natisni right after loading a row can't print a half-drawn page. */
+  function awaitImage(img) {
+    return new Promise(function (resolve) {
+      if (img.complete && img.naturalWidth) { resolve(true); return; }
+      img.onload = function () { resolve(true); };
+      img.onerror = function () { resolve(false); };
+    });
   }
 
   /* ------------------------------------------------------------------
@@ -509,11 +546,24 @@
     var img = el('v-podpis');
     img.style.display = 'none';
     img.removeAttribute('src');
-    try {
-      var src = await resolveSignature(raw(record, mappings, 'Podpis'));
-      if (src) { img.src = src; img.style.display = ''; }
-    } catch (e) {
-      console.warn('Podpisa ni bilo mogoče naložiti:', e);
+    status.textContent = '';
+    var podpisRaw = raw(record, mappings, 'Podpis');
+    if (podpisRaw !== null && podpisRaw !== undefined && podpisRaw !== '') {
+      try {
+        var src = await resolveSignature(podpisRaw);
+        if (src) {
+          img.src = src;
+          img.style.display = '';
+          var ok = await awaitImage(img);
+          if (!ok) {
+            img.style.display = 'none';
+            status.textContent = 'Podpisa ni bilo mogoče prikazati.';
+          }
+        }
+      } catch (e) {
+        console.warn('Podpis:', e, 'vrednost celice:', podpisRaw);
+        status.textContent = 'Podpis: ' + e.message;
+      }
     }
   }
 
@@ -608,7 +658,7 @@
     el('scroller').style.display = '';
     if (!record) { clearPage(); return; }
     render(record, mappings).then(fit);
-  });
+  }, { keepEncoded: true });
 
   grist.onRecords(function (records) {
     if (!records || !records.length) {
