@@ -48,18 +48,6 @@
      rules below, and remove the `hidden` attribute from the PDF button. */
   #scroller { height: 0; overflow: hidden; padding: 0; }
   #empty { display: none !important; }
-
-  /* DEBUG panel — delete along with the "Preveri podpis" button. */
-  #diag {
-    padding: 10px; background: #fff; border-bottom: 1px solid #ccd3da;
-    font-size: 12px; max-height: 60vh; overflow: auto;
-  }
-  #diag pre {
-    margin: 0 0 8px; white-space: pre-wrap; word-break: break-all;
-    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
-  }
-  #diagImgWrap { color: #5a6670; }
-  #diagImg { display: block; margin-top: 4px; max-height: 80px; border: 1px solid #ccd3da; }
   #stage { transform-origin: top left; }
   #empty {
     display: none;
@@ -147,14 +135,7 @@
   <button id="btnPrint" class="primary">Natisni</button>
   <!-- Kept for fallback / re-enable: remove `hidden` to show the PDF download button. -->
   <button id="btnPdf" hidden>Prenesi PDF</button>
-  <!-- DEBUG: delete this button (and the #diag div below) once the signature works. -->
-  <button id="btnDiag">Preveri podpis</button>
   <span id="status" role="status"></span>
-</div>
-
-<div id="diag" hidden>
-  <pre id="diagText"></pre>
-  <div id="diagImgWrap">Prenesena slika:<br><img id="diagImg" alt=""></div>
 </div>
 
 <div id="empty">
@@ -496,10 +477,13 @@
   }
 
   /* Returns a URL/data-URL for the signature, or null when there is
-     nothing to show. `log` (optional) collects a step-by-step trace for
-     the diagnostics panel. */
+     nothing to show. Each step is traced to the browser console, which is
+     where to look first if a signature ever stops appearing. */
   async function resolveSignature(value, log) {
-    var note = function (m) { if (log) { log.push(m); } };
+    var note = function (m) {
+      console.debug('[podpis]', m);
+      if (log) { log.push(m); }
+    };
 
     if (typeof value === 'string') {
       var s = value.trim();
@@ -711,53 +695,6 @@
 
   el('btnPdf').addEventListener('click', downloadPdf);
 
-  /* DEBUG: reports exactly where the signature pipeline stops.
-     Delete this block, the button and the #diag markup once it works. */
-  el('btnDiag').addEventListener('click', async function () {
-    var panel = el('diag');
-    var out = el('diagText');
-    var prev = el('diagImg');
-    panel.hidden = false;
-    prev.removeAttribute('src');
-    var log = [];
-
-    if (!lastRecord) {
-      out.textContent = 'Nobena vrstica ni izbrana. V nastavitvah widgeta nastavite "Select By".';
-      return;
-    }
-
-    var mapped = lastMappings ? lastMappings['Podpis'] : undefined;
-    log.push('Preslikani stolpec za Podpis: ' + JSON.stringify(mapped));
-    if (!mapped) {
-      log.push('>> Stolpec ni preslikan. Odprite desni panel > Column Mapping > "Podpis (slika)".');
-      out.textContent = log.join('\n');
-      return;
-    }
-
-    var v = raw(lastRecord, lastMappings, 'Podpis');
-    log.push('Tip vrednosti: ' + (Array.isArray(v) ? 'array' : typeof v));
-    try { log.push('Vrednost celice: ' + JSON.stringify(v)); }
-    catch (e) { log.push('Vrednost celice: <ni serializabilna>'); }
-    log.push('Razpolozljivi stolpci v vrstici: ' + Object.keys(lastRecord).join(', '));
-    log.push('---');
-
-    try {
-      var src = await resolveSignature(v, log);
-      if (!src) {
-        log.push('>> Rezultat: brez slike (celica je prazna ali brez priponk).');
-      } else {
-        log.push('>> Rezultat: ' + (src.indexOf('data:') === 0
-          ? 'slika vdelana (data URL, ' + src.length + ' znakov)'
-          : 'neposredni naslov: ' + src));
-        prev.src = src;
-        var ok = await awaitImage(prev);
-        log.push(ok ? '>> Slika se je uspesno izrisala.' : '>> Slike ni bilo mogoce izrisati (napaka nalaganja).');
-      }
-    } catch (e) {
-      log.push('>> NAPAKA: ' + e.message);
-    }
-    out.textContent = log.join('\n');
-  });
   el('btnPrint').addEventListener('click', function () {
     try { window.focus(); window.print(); }
     catch (e) { status.textContent = 'Tiskanje blokirano — uporabite Prenesi PDF.'; }
