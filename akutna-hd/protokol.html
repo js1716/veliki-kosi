@@ -38,6 +38,7 @@
   }
   #toolbar button.primary { background: #16b378; border-color: #12996a; color: #fff; padding: 7px 18px; }
   #toolbar button:disabled { opacity: .5; cursor: default; }
+  #toolbar button.armed { background: #e8813a; border-color: #c96a2a; color: #fff; }
   #toolbar button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
   #status { margin-left: auto; color: #5a6670; }
 
@@ -133,6 +134,7 @@
 
 <div id="toolbar">
   <button id="btnPrint" class="primary">Natisni</button>
+  <button id="btnNew">Prenesi navodila v novo HD</button>
   <!-- Kept for fallback / re-enable: remove `hidden` to show the PDF download button. -->
   <button id="btnPdf" hidden>Prenesi PDF</button>
   <span id="status" role="status"></span>
@@ -316,7 +318,7 @@
 (function () {
   "use strict";
 
-  var BUILD = '2026-09-10-6';
+  var BUILD = '2026-09-10-7';
   console.info('[protokol] build ' + BUILD);
 
   /* ------------------------------------------------------------------
@@ -753,6 +755,131 @@
       btn.disabled = false;
     }
   }
+
+  /* ------------------------------------------------------------------
+     6b. "Prenesi navodila v novo HD"
+     Adds a fresh row to the same table, carrying every data column of the
+     current record across, except: Zap. št., Nefrolog and Podpis (left
+     empty for the new session) and Datum HD (set to today).
+  ------------------------------------------------------------------ */
+
+  /* Which columns of `tableId` may be written, and what type they are.
+     Formula columns must be skipped — writing to one is an error. */
+  async function columnMeta(tableId) {
+    var tables = await grist.docApi.fetchTable('_grist_Tables');
+    var ref = null;
+    for (var i = 0; i < tables.id.length; i++) {
+      if (tables.tableId[i] === tableId) { ref = tables.id[i]; break; }
+    }
+    var cols = await grist.docApi.fetchTable('_grist_Tables_column');
+    var out = {};
+    for (var j = 0; j < cols.id.length; j++) {
+      if (cols.parentId[j] !== ref) { continue; }
+      // An empty column has isFormula=true with a blank formula and is
+      // still writable; a trigger formula has isFormula=false.
+      var isRealFormula = !!cols.isFormula[j] && String(cols.formula[j] || '').trim() !== '';
+      out[cols.colId[j]] = { type: String(cols.type[j] || ''), writable: !isRealFormula };
+    }
+    return out;
+  }
+
+  /* Today, in whatever shape the mapped Datum column stores. */
+  function todayFor(type) {
+    var now = new Date();
+    if (type.indexOf('DateTime') === 0) {
+      return Math.floor(now.getTime() / 1000);
+    }
+    if (type === 'Date') {
+      // Date columns store UTC midnight of the calendar day.
+      return Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) / 1000;
+    }
+    return now.getDate() + '. ' + (now.getMonth() + 1) + '. ' + now.getFullYear();
+  }
+
+  function mappedCol(key) {
+    var c = lastMappings ? lastMappings[key] : null;
+    if (Array.isArray(c)) { c = c[0]; }
+    return c || null;
+  }
+
+  async function createNextHd() {
+    if (!lastRecord) { throw new Error('Ni izbrane vrstice.'); }
+
+    var datumCol = mappedCol('Datum_HD');
+    if (!datumCol) {
+      throw new Error('Preslikajte stolpec "Datum HD" — brez njega ni mogoče vpisati datuma.');
+    }
+
+    var skip = { id: true, manualSort: true };
+    ['Zaporedna_st', 'Nefrolog', 'Podpis'].forEach(function (k) {
+      var c = mappedCol(k);
+      if (c) { skip[c] = true; }
+    });
+
+    var tableId = await grist.getSelectedTableId();
+    var meta = await columnMeta(tableId);
+
+    // fetchTable gives storage-form values, which is exactly what a write
+    // expects — unlike the encoded values we receive in onRecord.
+    var data = await grist.docApi.fetchTable(tableId);
+    var idx = data.id.indexOf(lastRecord.id);
+    if (idx < 0) { throw new Error('Izbrane vrstice ni bilo mogoče najti v tabeli.'); }
+
+    var fields = {};
+    Object.keys(data).forEach(function (colId) {
+      if (colId === 'id' || skip[colId]) { return; }
+      var m = meta[colId];
+      if (!m || !m.writable) { return; }
+      fields[colId] = data[colId][idx];
+    });
+
+    fields[datumCol] = todayFor((meta[datumCol] && meta[datumCol].type) || '');
+
+    var table = grist.selectedTable || (grist.getTable && grist.getTable());
+    if (!table || !table.create) { throw new Error('Pisanje v tabelo ni na voljo.'); }
+    var created = await table.create({ fields: fields });
+    return (created && created.id) || null;
+  }
+
+  /* Two-step click: creating a duplicate row by accident is worse than
+     one extra click. The armed state reverts on its own. */
+  (function wireNewHd() {
+    var btn = el('btnNew');
+    var label = btn.textContent;
+    var armed = false;
+    var timer = null;
+
+    function disarm() {
+      armed = false;
+      clearTimeout(timer);
+      btn.textContent = label;
+      btn.classList.remove('armed');
+    }
+
+    btn.addEventListener('click', async function () {
+      if (!armed) {
+        if (!lastRecord) { status.textContent = 'Ni izbrane vrstice.'; return; }
+        armed = true;
+        btn.textContent = 'Potrdi: nova HD';
+        btn.classList.add('armed');
+        status.textContent = 'Kliknite še enkrat za potrditev.';
+        timer = setTimeout(function () { disarm(); status.textContent = ''; }, 5000);
+        return;
+      }
+      disarm();
+      btn.disabled = true;
+      status.textContent = 'Ustvarjam novo HD …';
+      try {
+        var newId = await createNextHd();
+        status.textContent = 'Nova HD ustvarjena' + (newId ? ' (vrstica ' + newId + ')' : '') + '.';
+      } catch (e) {
+        console.error('[protokol] nova HD:', e);
+        status.textContent = 'Napaka: ' + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
 
   el('btnPdf').addEventListener('click', downloadPdf);
 
