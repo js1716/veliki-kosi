@@ -48,6 +48,18 @@
      rules below, and remove the `hidden` attribute from the PDF button. */
   #scroller { height: 0; overflow: hidden; padding: 0; }
   #empty { display: none !important; }
+
+  /* DEBUG panel — delete along with the "Preveri podpis" button. */
+  #diag {
+    padding: 10px; background: #fff; border-bottom: 1px solid #ccd3da;
+    font-size: 12px; max-height: 60vh; overflow: auto;
+  }
+  #diag pre {
+    margin: 0 0 8px; white-space: pre-wrap; word-break: break-all;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; line-height: 1.45;
+  }
+  #diagImgWrap { color: #5a6670; }
+  #diagImg { display: block; margin-top: 4px; max-height: 80px; border: 1px solid #ccd3da; }
   #stage { transform-origin: top left; }
   #empty {
     display: none;
@@ -135,7 +147,14 @@
   <button id="btnPrint" class="primary">Natisni</button>
   <!-- Kept for fallback / re-enable: remove `hidden` to show the PDF download button. -->
   <button id="btnPdf" hidden>Prenesi PDF</button>
+  <!-- DEBUG: delete this button (and the #diag div below) once the signature works. -->
+  <button id="btnDiag">Preveri podpis</button>
   <span id="status" role="status"></span>
+</div>
+
+<div id="diag" hidden>
+  <pre id="diagText"></pre>
+  <div id="diagImgWrap">Prenesena slika:<br><img id="diagImg" alt=""></div>
 </div>
 
 <div id="empty">
@@ -437,6 +456,29 @@
     });
   }
 
+  /* Last resort when getAccessToken is missing or refused: build the API
+     URL from the Grist page that hosts this iframe. An <img> loading that
+     URL authenticates with the user's own session cookie. Works only when
+     the widget is served from the same Grist origin, or when that origin
+     allows the image request. */
+  function apiBaseFromReferrer() {
+    try {
+      if (!document.referrer) { return null; }
+      var u = new URL(document.referrer);
+      var parts = u.pathname.split('/').filter(Boolean);
+      var docId = null;
+      var i = parts.indexOf('doc');
+      if (i >= 0 && parts[i + 1]) {
+        docId = parts[i + 1];
+      } else if (parts[0] === 'o' && parts[2]) {
+        docId = parts[2];
+      } else if (parts[0]) {
+        docId = parts[0];
+      }
+      return docId ? (u.origin + '/api/docs/' + docId) : null;
+    } catch (e) { return null; }
+  }
+
   /* An Attachments cell can reach us in several shapes depending on the
      Grist version and whether values arrive encoded:
        ['L', 3, 7]   encoded reference list
@@ -453,30 +495,56 @@
     return [];
   }
 
-  async function resolveSignature(value) {
+  /* Returns a URL/data-URL for the signature, or null when there is
+     nothing to show. `log` (optional) collects a step-by-step trace for
+     the diagnostics panel. */
+  async function resolveSignature(value, log) {
+    var note = function (m) { if (log) { log.push(m); } };
+
     if (typeof value === 'string') {
       var s = value.trim();
-      if (!s) { return null; }
-      if (s.indexOf('data:') === 0 || s.indexOf('http') === 0) { return s; }
+      if (!s) { note('Besedilna celica je prazna.'); return null; }
+      if (s.indexOf('data:') === 0 || s.indexOf('http') === 0) {
+        note('Besedilna celica vsebuje naslov slike.');
+        return s;
+      }
       throw new Error('Stolpec Podpis je besedilo, ki ni slika ali URL.');
     }
 
     var ids = attachmentIds(value);
+    note('Najdeni ID-ji priponk: ' + (ids.length ? ids.join(', ') : '(brez)'));
     if (!ids.length) { return null; }
 
-    if (!grist.docApi || !grist.docApi.getAccessToken) {
-      throw new Error('Ta različica Grista ne podpira getAccessToken.');
+    var url = null;
+    if (grist.docApi && grist.docApi.getAccessToken) {
+      try {
+        var tok = await grist.docApi.getAccessToken({ readOnly: true });
+        url = tok.baseUrl + '/attachments/' + ids[0] + '/download?auth=' + tok.token;
+        note('getAccessToken OK, baseUrl = ' + tok.baseUrl);
+      } catch (e) {
+        note('getAccessToken NI uspel: ' + e.message);
+      }
+    } else {
+      note('grist.docApi.getAccessToken ni na voljo.');
     }
-    var tok = await grist.docApi.getAccessToken({ readOnly: true });
-    var url = tok.baseUrl + '/attachments/' + ids[0] + '/download?auth=' + tok.token;
+
+    if (!url) {
+      var base = apiBaseFromReferrer();
+      if (!base) { throw new Error('Ni dostopa do priponk (ni žetona in ni referrerja).'); }
+      url = base + '/attachments/' + ids[0] + '/download';
+      note('Uporabljam nadomestni naslov prek piškotka: ' + base);
+    }
 
     // Preferred: inline the bytes as a data URL, so the image survives
     // printing and PDF export without a second network round trip.
     try {
-      var resp = await fetch(url);
+      var resp = await fetch(url, { credentials: 'include' });
       if (!resp.ok) { throw new Error('HTTP ' + resp.status); }
-      return await blobToDataUrl(await resp.blob());
+      var blob = await resp.blob();
+      note('Prenos OK: ' + blob.type + ', ' + blob.size + ' bajtov.');
+      return await blobToDataUrl(blob);
     } catch (e) {
+      note('Prenos ni uspel (' + e.message + '), poskušam neposredno v <img>.');
       console.warn('Inline branje podpisa ni uspelo, uporabljam neposredni URL:', e);
       return url;   // let the <img> element load it itself
     }
@@ -496,6 +564,8 @@
      4. Render one record onto the page
   ------------------------------------------------------------------ */
   var currentName = 'protokol';
+  var lastRecord = null;
+  var lastMappings = null;
 
   async function render(record, mappings) {
     var g = function (k) { return text(record, mappings, k); };
@@ -640,6 +710,54 @@
   }
 
   el('btnPdf').addEventListener('click', downloadPdf);
+
+  /* DEBUG: reports exactly where the signature pipeline stops.
+     Delete this block, the button and the #diag markup once it works. */
+  el('btnDiag').addEventListener('click', async function () {
+    var panel = el('diag');
+    var out = el('diagText');
+    var prev = el('diagImg');
+    panel.hidden = false;
+    prev.removeAttribute('src');
+    var log = [];
+
+    if (!lastRecord) {
+      out.textContent = 'Nobena vrstica ni izbrana. V nastavitvah widgeta nastavite "Select By".';
+      return;
+    }
+
+    var mapped = lastMappings ? lastMappings['Podpis'] : undefined;
+    log.push('Preslikani stolpec za Podpis: ' + JSON.stringify(mapped));
+    if (!mapped) {
+      log.push('>> Stolpec ni preslikan. Odprite desni panel > Column Mapping > "Podpis (slika)".');
+      out.textContent = log.join('\n');
+      return;
+    }
+
+    var v = raw(lastRecord, lastMappings, 'Podpis');
+    log.push('Tip vrednosti: ' + (Array.isArray(v) ? 'array' : typeof v));
+    try { log.push('Vrednost celice: ' + JSON.stringify(v)); }
+    catch (e) { log.push('Vrednost celice: <ni serializabilna>'); }
+    log.push('Razpolozljivi stolpci v vrstici: ' + Object.keys(lastRecord).join(', '));
+    log.push('---');
+
+    try {
+      var src = await resolveSignature(v, log);
+      if (!src) {
+        log.push('>> Rezultat: brez slike (celica je prazna ali brez priponk).');
+      } else {
+        log.push('>> Rezultat: ' + (src.indexOf('data:') === 0
+          ? 'slika vdelana (data URL, ' + src.length + ' znakov)'
+          : 'neposredni naslov: ' + src));
+        prev.src = src;
+        var ok = await awaitImage(prev);
+        log.push(ok ? '>> Slika se je uspesno izrisala.' : '>> Slike ni bilo mogoce izrisati (napaka nalaganja).');
+      }
+    } catch (e) {
+      log.push('>> NAPAKA: ' + e.message);
+    }
+    out.textContent = log.join('\n');
+  });
   el('btnPrint').addEventListener('click', function () {
     try { window.focus(); window.print(); }
     catch (e) { status.textContent = 'Tiskanje blokirano — uporabite Prenesi PDF.'; }
@@ -657,6 +775,8 @@
     el('empty').style.display = 'none';
     el('scroller').style.display = '';
     if (!record) { clearPage(); return; }
+    lastRecord = record;
+    lastMappings = mappings;
     render(record, mappings).then(fit);
   }, { keepEncoded: true });
 
