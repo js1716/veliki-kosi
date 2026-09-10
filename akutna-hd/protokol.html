@@ -36,12 +36,18 @@
     background: #fff;
     cursor: pointer;
   }
-  #toolbar button.primary { background: #16b378; border-color: #12996a; color: #fff; }
+  #toolbar button.primary { background: #16b378; border-color: #12996a; color: #fff; padding: 7px 18px; }
   #toolbar button:disabled { opacity: .5; cursor: default; }
   #toolbar button:focus-visible { outline: 2px solid #1a73e8; outline-offset: 1px; }
   #status { margin-left: auto; color: #5a6670; }
 
-  #scroller { padding: 12px; overflow: auto; }
+  /* The form itself is never shown on screen — it exists only so the
+     browser has something to print. height:0 keeps it laid out (unlike
+     display:none), so printing and PDF export still work.
+     To bring the on-screen preview back: delete the #scroller and #empty
+     rules below, and remove the `hidden` attribute from the PDF button. */
+  #scroller { height: 0; overflow: hidden; padding: 0; }
+  #empty { display: none !important; }
   #stage { transform-origin: top left; }
   #empty {
     display: none;
@@ -117,7 +123,7 @@
   @media print {
     body { background: #fff; }
     #toolbar, #empty { display: none !important; }
-    #scroller { padding: 0; overflow: visible; }
+    #scroller { height: auto; padding: 0; overflow: visible; }
     #stage { transform: none !important; width: auto !important; height: auto !important; }
     .page { box-shadow: none; }
   }
@@ -126,9 +132,10 @@
 <body>
 
 <div id="toolbar">
-  <button id="btnPdf" class="primary">Prenesi PDF</button>
-  <button id="btnPrint">Natisni</button>
-  <span id="status"></span>
+  <button id="btnPrint" class="primary">Natisni</button>
+  <!-- Kept for fallback / re-enable: remove `hidden` to show the PDF download button. -->
+  <button id="btnPdf" hidden>Prenesi PDF</button>
+  <span id="status" role="status"></span>
 </div>
 
 <div id="empty">
@@ -529,10 +536,18 @@
   function fit() {
     var page = el('page');
     var stage = el('stage');
-    var avail = el('scroller').clientWidth;
+    var scroller = el('scroller');
+    var avail = scroller.clientWidth;
     var w = page.offsetWidth;   // 297mm in px
     var h = page.offsetHeight;
-    if (!w || !avail) { return; }
+    // Preview hidden (or not measurable yet) — leave the page at natural
+    // size so printing and PDF export keep their full-scale geometry.
+    if (!w || !avail || !scroller.clientHeight) {
+      stage.style.transform = 'none';
+      stage.style.width = 'auto';
+      stage.style.height = 'auto';
+      return;
+    }
     var scale = Math.min(1, avail / w);
     stage.style.transform = 'scale(' + scale + ')';
     stage.style.width = (w * scale) + 'px';
