@@ -316,6 +316,9 @@
 (function () {
   "use strict";
 
+  var BUILD = '2026-09-10-6';
+  console.info('[protokol] build ' + BUILD);
+
   /* ------------------------------------------------------------------
      1. Column mapping definitions — these appear in the widget's
         "Column Mapping" panel in the Grist right-hand creator panel.
@@ -413,19 +416,29 @@
      ['d', seconds] and a DateTime as ['D', seconds, timezone]. Older
      versions may hand over a bare number instead. Anything else (a Text
      column) is passed through as typed. */
+  /* Grist encoding codes that are definitely not dates — lists,
+     references, and error/placeholder markers. Everything else with a
+     numeric payload is treated as seconds since the epoch. */
+  var NON_DATE_CODES = { L: 1, R: 1, r: 1, P: 1, C: 1, U: 1, E: 1, S: 1, O: 1 };
+
   function dateParts(value) {
     var secs = null, tz = 'UTC';
-    if (typeof value === 'number') {
+    if (value instanceof Date) {
+      secs = value.getTime() / 1000;
+    } else if (typeof value === 'number') {
       secs = value;
-    } else if (Array.isArray(value)) {
-      if (value[0] === 'd' && typeof value[1] === 'number') {
-        secs = value[1];
-      } else if (value[0] === 'D' && typeof value[1] === 'number') {
-        secs = value[1];
-        tz = value[2] || 'UTC';
-      }
+    } else if (typeof value === 'string' && /^\d{9,11}$/.test(value.trim())) {
+      secs = Number(value.trim());
+    } else if (Array.isArray(value) && typeof value[0] === 'string' &&
+               value[0].length === 1 && !NON_DATE_CODES[value[0]] &&
+               typeof value[1] === 'number') {
+      // ['d', seconds] = Date, ['D', seconds, timezone] = DateTime.
+      // Accepting any single-letter code keeps this working if Grist
+      // ever introduces another date-like encoding.
+      secs = value[1];
+      if (typeof value[2] === 'string') { tz = value[2]; }
     }
-    if (secs === null) { return null; }
+    if (secs === null || !isFinite(secs)) { return null; }
     var dt = new Date(secs * 1000);
     if (isNaN(dt.getTime())) { return null; }
 
@@ -607,7 +620,10 @@
       dateSlug(record, mappings, 'Datum_HD')
     ].filter(Boolean).join('_');
 
-    setText('v-datum',      dateText(record, mappings, 'Datum_HD'));
+    var datumRaw = raw(record, mappings, 'Datum_HD');
+    var datumOut = dateText(record, mappings, 'Datum_HD');
+    console.debug('[protokol] Datum_HD surovo =', datumRaw, '-> izpis =', JSON.stringify(datumOut));
+    setText('v-datum', datumOut);
     setText('v-cashd',      g('Cas_HD'));
     setText('v-dializator', g('Dializator'));
     setText('v-ca',         g('Ca'));
