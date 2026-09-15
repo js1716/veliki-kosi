@@ -96,7 +96,7 @@
     font-size: 9pt; font-weight: 700;
   }
 
-  #v-navodila div { line-height: 5.6mm; }
+  #v-navodila div { line-height: 5.4mm; }
   #v-terapija { white-space: pre-wrap; }
 
   .sig { display: flex; align-items: flex-end; gap: 2mm; }
@@ -138,7 +138,9 @@
       <!-- Čas HD: -->
       <div class="f" id="v-cashd" style="left:95mm; top:31.3mm; width:24mm"></div>
       <!-- Dializator: -->
-      <div class="f" id="v-dializator" style="left:98mm; top:40.7mm; width:21mm"></div>
+      <div class="f" id="v-dializator"
+           style="left:98mm; top:40.35mm; width:21.2mm; height:6.9mm;
+                  font-size:8.5pt; white-space:normal; line-height:1.08"></div>
       <!-- Dial. raztopina Ca: / K: -->
       <div class="f" id="v-ca" style="left:88.5mm; top:53.7mm; width:30mm; font-size:8.5pt"></div>
       <div class="f" id="v-k"  style="left:86.8mm; top:59.3mm; width:32mm; font-size:8.5pt"></div>
@@ -165,7 +167,7 @@
 
       <!-- KLINIČNI PREGLED IN NAVODILA -->
       <div class="f wrap" id="v-navodila"
-           style="left:17.5mm; top:149mm; width:79mm; font-size:8.5pt"></div>
+           style="left:17.5mm; top:148.7mm; width:79mm; font-size:8.5pt"></div>
 
       <!-- DODATNA TERAPIJA MED IN PO HD -->
       <div class="f wrap" id="v-terapija"
@@ -193,7 +195,7 @@
 (function () {
   "use strict";
 
-  var BUILD = '2026-09-15-10';
+  var BUILD = '2026-09-15-12';
   console.info('[protokol] build ' + BUILD);
 
   /* ------------------------------------------------------------------
@@ -215,6 +217,8 @@
     { name: 'Antikoagulacija',title: 'Antikoagulacija',          type: 'Any', optional: true },
     { name: 'Tip_HD',         title: 'Tip HD',                   type: 'Any', optional: true },
     { name: 'Zaporedna_st',   title: 'Zap. št.',                 type: 'Any', optional: true },
+    { name: 'Qb',             title: 'Navodila – Qb',            type: 'Any', optional: true, description: 'Samo številka; enota " ml/min" se doda samodejno' },
+    { name: 'Qd',             title: 'Navodila – Qd',            type: 'Any', optional: true, description: 'Samo številka; enota " ml/min" se doda samodejno' },
     { name: 'UF',             title: 'Navodila – UF',            type: 'Any', optional: true },
     { name: 'HCO3',           title: 'Navodila – HCO3',          type: 'Any', optional: true },
     { name: 'Na',             title: 'Navodila – Na',            type: 'Any', optional: true },
@@ -332,6 +336,37 @@
 
   function setText(id, value) { el(id).textContent = value || ''; }
   function tick(id, on) { el(id).textContent = on ? '\u2715' : ''; }
+
+  /* Cells on the form are narrow and fixed. Rather than clipping a long
+     value, step its type size down until it fits — by width, and by
+     height for cells that are allowed to wrap. [base pt, minimum pt] */
+  var FIT = {
+    'v-pacient':    [11,  8],
+    'v-cashd':      [9,   6],
+    'v-dializator': [8.5, 6],
+    'v-ca':         [8.5, 6.5],
+    'v-k':          [8.5, 6.5],
+    'v-datum':      [9,   7],
+    'v-temp':       [7,   5.5],
+    'v-cvk':        [8.5, 6],
+    'v-antikoag':   [8,   6],
+    'v-tiphd':      [9,   6.5],
+    'v-zapst':      [9,   7]
+  };
+
+  function autofit() {
+    Object.keys(FIT).forEach(function (id) {
+      var e = el(id), base = FIT[id][0], min = FIT[id][1];
+      e.style.fontSize = base + 'pt';
+      if (!e.textContent) { return; }
+      var pt = base, guard = 40;
+      while (pt > min && guard-- > 0 &&
+             (e.scrollWidth > e.clientWidth + 1 || e.scrollHeight > e.clientHeight + 1)) {
+        pt -= 0.25;
+        e.style.fontSize = pt + 'pt';
+      }
+    });
+  }
 
   /* ------------------------------------------------------------------
      3. Signature
@@ -463,19 +498,33 @@
     tick('cb-avf-da', !!avf);
     tick('cb-avf-ne', !avf);
 
-    // Six instruction lines; empty ones are skipped so the block stays tight.
-    var box = el('v-navodila');
-    box.innerHTML = '';
+    // Instruction lines; empty ones are skipped so the block stays tight.
+    var lines = [];
+
+    // Qb and Qd share the first line: "Qb 300 ml/min, Qd 500 ml/min"
+    var flows = [];
+    ['Qb', 'Qd'].forEach(function (k) {
+      var v = g(k);
+      if (v) { flows.push(k + ' ' + v + ' ml/min'); }
+    });
+    if (flows.length) { lines.push(flows.join(', ')); }
+
     NAVODILA_LINES.forEach(function (pair) {
       var v = g(pair[1]);
-      if (!v) { return; }
+      if (v) { lines.push(pair[0] + ' ' + v); }
+    });
+
+    var box = el('v-navodila');
+    box.innerHTML = '';
+    lines.forEach(function (t) {
       var d = document.createElement('div');
-      d.textContent = pair[0] + ' ' + v;
+      d.textContent = t;
       box.appendChild(d);
     });
 
     el('v-terapija').textContent = g('Terapija');
     setText('v-nefrolog', g('Nefrolog'));
+    autofit();
 
     var img = el('v-podpis');
     img.style.display = 'none';
